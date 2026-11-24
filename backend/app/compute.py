@@ -91,6 +91,67 @@ def compaction_planner(
 
 
 # ------------------------------------------------------------------
+# plan_compaction_groups / validate_group_capacity
+# ------------------------------------------------------------------
+
+def plan_compaction_groups(
+    files: list[dict[str, Any]],
+    group_limit_bytes: int,
+) -> dict[str, Any]:
+    """按每个物理分区的容量上限对待压缩文件做稳定装箱分组。
+
+    稳定性约定：分区之间按分区名排序，分区内文件按文件名排序，
+    采用首次适配（first-fit）且不打乱已建立的组序——同样的输入
+    永远得到同样的分组，重复规划不会抖动。组不跨物理分区。
+
+    files 元素：{"partition", "name", "size_bytes", ...}（其余键原样保留）。
+    """
+    limit = max(1, int(group_limit_bytes))
+    ordered = sorted(
+        files,
+        key=lambda f: (str(f.get("partition", "")), str(f.get("name", ""))),
+    )
+    groups: list[dict[str, Any]] = []
+    by_partition: dict[str, list[dict[str, Any]]] = {}
+    for file_info in ordered:
+        partition = str(file_info.get("partition", ""))
+        size = int(file_info.get("size_bytes", 0))
+        bucket = by_partition.setdefault(partition, [])
+        placed = False
+        for group in bucket:
+            if group["planned_bytes"] + size <= limit:
+                group["files"].append(file_info)
+                group["planned_bytes"] += size
+                placed = True
+                break
+        if not placed:
+            group = {"partition": partition, "files": [file_info], "planned_bytes": size}
+            bucket.append(group)
+            groups.append(group)
+    for group in groups:
+        group["fits_limit"] = group["planned_bytes"] <= limit
+    return {
+        "groups": groups,
+        "group_count": len(groups),
+        "file_count": len(ordered),
+        "group_limit_bytes": limit,
+        "total_bytes": sum(g["planned_bytes"] for g in groups),
+    }
+
+
+def validate_group_capacity(actual_bytes: int, limit_bytes: int) -> dict[str, Any]:
+    """容量阈值校验：按实际读取到的文件字节数核对组上限。"""
+    actual = int(actual_bytes)
+    limit = int(limit_bytes)
+    return {
+        "fits": actual <= limit,
+        "actual_bytes": actual,
+        "limit_bytes": limit,
+        "overflow_bytes": max(0, actual - limit),
+    }
+
+
+# ------------------------------------------------------------------
 # snapshot_differ
 # ------------------------------------------------------------------
 

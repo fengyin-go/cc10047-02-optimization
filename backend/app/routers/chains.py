@@ -62,7 +62,7 @@ def chain_stream_ingest(source_id: int, ingest_id: int, commit_id: int) -> dict:
 
 @router.post("/storage-optimize")
 def chain_storage_optimize(table_id: int, merge_id: int, compaction_id: int) -> dict:
-    """存储优化链路：定义湖表 → 合并分区 → 规划压缩 → 压缩表。"""
+    """存储优化链路：定义湖表 → 规划压缩 → 合并分区（读清单产出文件）→ 压缩汇总。"""
     steps = []
 
     # Step 1: 定义湖表
@@ -74,32 +74,32 @@ def chain_storage_optimize(table_id: int, merge_id: int, compaction_id: int) -> 
     if not r1["ok"]:
         return {"chain": "storage-optimize", "ok": False, "steps": steps, "error": r1.get("message")}
 
-    # Step 2: 合并分区
-    svc_merge = service_for("partition_merge")
-    if not svc_merge:
-        raise HTTPException(404, "partition_merge 服务未注册")
-    r2 = svc_merge.domain_merge_partitions(merge_id)
-    steps.append({"step": "merge_partitions", "ok": r2["ok"], "details": r2})
-    if not r2["ok"]:
-        return {"chain": "storage-optimize", "ok": False, "steps": steps, "error": r2.get("message")}
-
-    # Step 3: 规划压缩
+    # Step 2: 规划压缩，生成分区压缩执行清单
     svc_comp = service_for("compaction_task")
     if not svc_comp:
         raise HTTPException(404, "compaction_task 服务未注册")
-    r3 = svc_comp.domain_plan_compaction(compaction_id)
-    steps.append({"step": "plan_compaction", "ok": r3["ok"], "details": r3})
+    r2 = svc_comp.domain_plan_compaction(compaction_id)
+    steps.append({"step": "plan_compaction", "ok": r2["ok"], "details": r2})
+    if not r2["ok"]:
+        return {"chain": "storage-optimize", "ok": False, "steps": steps, "error": r2.get("message")}
+
+    # Step 3: 合并分区，读取执行清单实际产出文件
+    svc_merge = service_for("partition_merge")
+    if not svc_merge:
+        raise HTTPException(404, "partition_merge 服务未注册")
+    r3 = svc_merge.domain_merge_partitions(merge_id, compaction_id=compaction_id)
+    steps.append({"step": "merge_partitions", "ok": r3["ok"], "details": r3})
     if not r3["ok"]:
         return {"chain": "storage-optimize", "ok": False, "steps": steps, "error": r3.get("message")}
 
-    # Step 4: 压缩表
+    # Step 4: 压缩汇总
     r4 = svc_comp.domain_compact_table(compaction_id)
     steps.append({"step": "compact_table", "ok": r4["ok"], "details": r4})
 
     return {"chain": "storage-optimize", "ok": True, "steps": steps, "summary": {
         "table_def": r1.get("ddl"),
-        "merged_files": r2.get("merged_files"),
-        "compaction_plan": r3.get("plan"),
+        "merged_files": r3.get("merged_files"),
+        "compaction_plan": r2.get("plan"),
         "compression_ratio": r4.get("compression_ratio"),
     }}
 

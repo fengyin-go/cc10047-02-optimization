@@ -109,3 +109,6 @@ desktop.ini
 !**/.env.example
 !.env.example
 # END S11 LOCAL SNAPSHOT EXCLUSIONS
+
+# ===== 模拟湖存储（压缩/合并产物） =====
+backend/var/

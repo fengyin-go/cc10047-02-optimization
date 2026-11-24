@@ -9,6 +9,8 @@ from app.compute import (
     partition_calculator,
     merge_strategy,
     compaction_planner,
+    plan_compaction_groups,
+    validate_group_capacity,
     snapshot_differ,
     retention_checker,
     version_conflict_resolver,
@@ -61,6 +63,70 @@ class TestCompactionPlanner:
     def test_parallelism_capped(self):
         result = compaction_planner("test_table", [8 * 1024 * 1024] * 20, max_parallelism=4)
         assert result["parallelism"] <= 4
+
+
+class TestPlanCompactionGroups:
+    def test_stable_first_fit_grouping(self):
+        files = [
+            {"partition": "p1", "name": "f1", "size_bytes": 180},
+            {"partition": "p1", "name": "f2", "size_bytes": 180},
+            {"partition": "p1", "name": "f3", "size_bytes": 96},
+            {"partition": "p1", "name": "f4", "size_bytes": 64},
+        ]
+        result = plan_compaction_groups(files, 256)
+        assert [g["planned_bytes"] for g in result["groups"]] == [244, 180, 96]
+        assert [[f["name"] for f in g["files"]] for g in result["groups"]] == [
+            ["f1", "f4"], ["f2"], ["f3"],
+        ]
+
+    def test_groups_never_cross_partitions(self):
+        files = [
+            {"partition": "p2", "name": "a", "size_bytes": 100},
+            {"partition": "p1", "name": "a", "size_bytes": 100},
+        ]
+        result = plan_compaction_groups(files, 256)
+        assert result["group_count"] == 2
+        assert [g["partition"] for g in result["groups"]] == ["p1", "p2"]
+
+    def test_deterministic_regardless_of_input_order(self):
+        files = [
+            {"partition": "p1", "name": "f3", "size_bytes": 96},
+            {"partition": "p1", "name": "f1", "size_bytes": 180},
+            {"partition": "p1", "name": "f4", "size_bytes": 64},
+            {"partition": "p1", "name": "f2", "size_bytes": 180},
+        ]
+        forward = plan_compaction_groups(files, 256)
+        shuffled = plan_compaction_groups(list(reversed(files)), 256)
+        assert [
+            (g["partition"], g["planned_bytes"], [f["name"] for f in g["files"]])
+            for g in forward["groups"]
+        ] == [
+            (g["partition"], g["planned_bytes"], [f["name"] for f in g["files"]])
+            for g in shuffled["groups"]
+        ]
+
+    def test_oversized_single_file_flagged(self):
+        files = [{"partition": "p1", "name": "big", "size_bytes": 300}]
+        result = plan_compaction_groups(files, 256)
+        assert result["group_count"] == 1
+        assert result["groups"][0]["fits_limit"] is False
+
+    def test_empty_input(self):
+        result = plan_compaction_groups([], 256)
+        assert result["group_count"] == 0
+        assert result["total_bytes"] == 0
+
+
+class TestValidateGroupCapacity:
+    def test_fits(self):
+        result = validate_group_capacity(244, 256)
+        assert result["fits"] is True
+        assert result["overflow_bytes"] == 0
+
+    def test_overflow(self):
+        result = validate_group_capacity(300, 256)
+        assert result["fits"] is False
+        assert result["overflow_bytes"] == 44
 
 
 class TestSnapshotDiffer:
